@@ -83,7 +83,7 @@ def main() -> None:
         # completer_delims = readline.get_completer_delims()
         # completer_delims = completer_delims.replace("-", "")
         # readline.set_completer_delims(completer_delims)
-        compl = Cmd_Complete()
+        compl = Cmd_Complete(flip=fcmd)
         compl.setup(volcab=fcmd.get_cmd_keys())
 
     lineno = 1

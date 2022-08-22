@@ -123,6 +123,7 @@ class FlipperCMD:
             ("HISTORY", "HIST"): self._print_cmd_hist,  # Do we need this?
             ("STOP-SESSION",): self.do_stop_session,
             ("START-SESSION",): self.do_start_session,
+            ("START-APP", "STARTAPP"): self.do_startapp,
             ("SEND", "SEND-COMMAND"): self._do_send_cmd,
             ("REBOOT",): self.do_reboot,
             ("QUIT", "EXIT"): self.do_quit,
@@ -492,6 +493,34 @@ class FlipperCMD:
     # def green(t):   return f'\033[92m{t}\033[0m'
     # def red(t):     return f'\033[91m{t}\033[0m'
 
+    def _get_list(self, path, ftype=None):
+
+        print(f"_get_list '{path}' '{ftype}'")
+
+        if not path.startswith('/'):
+            path = os.path.normpath(self.rdir + '/' + path)
+
+        # strip trailing slash
+        if len(path) > 1:
+            path = path.rstrip('/')
+
+        print(f"rpc_storage_list '{path}'")
+
+        flist = self.flip.rpc_storage_list(path)
+
+        # [line['name'] if line['type'] != 'DIR' else line['name'] + '/' for line in flist if line['type'] == ftype]
+        if ftype == 'DIR':
+            flist = [line['name'] + '/'  for line in flist if line['type'] == ftype]
+        elif ftype == 'FILE':
+            flist = [line['name'] for line in flist if line['type'] == ftype]
+        else:
+            flist = [line['name'] if line['type'] != 'DIR' else line['name'] + '/' for line in flist]
+
+        flist.sort()
+
+        # flist.sort(key=lambda x: (x['type'], x['name'].lower()))
+
+        return flist
     #
     # rpc call storage_list_request only takes folders as
     # a valid arg.
@@ -1212,6 +1241,35 @@ class FlipperCMD:
         # quit if not booting into OS mode
         if mode in ['DFU', 'UPDATE']:
             self.QuitException(f"REBOOT {mode}")
+
+    def do_startapp(self, cmd, argv):
+        """Start App
+            START-APP <command_name> <args>
+            Runs app in FlipperZero
+
+            App Names:
+                    "iButton", "NFC", "Sub-GHz", "125kHz-RFID",
+                    "Infrared", "Bad-USB", "U2F", "UpdaterApp"
+        """
+        if not argv or argv[0] in ["?", "help"]:
+            raise cmdException(f"Syntax :\n\t{cmd} <command_name> <args>")
+
+        args = ""
+
+        app_map = {
+            'Bad-USB': "Bad USB",
+            '125kHz-RFID': "125 kHz RFID"
+        }
+
+        appname = argv.pop(0)
+
+        appname = app_map.get(appname, appname)
+
+        if argv:
+            args = argv.pop(0)
+
+        self.flip.rpc_app_start(appname, args)
+
 
 
 #
