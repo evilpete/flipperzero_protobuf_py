@@ -1,6 +1,6 @@
 
 [MASTER]
-ignore=flipperzero_protobuf_compiled
+ignore=flipperzero_protobuf_compiled,too-many-public-methods
 
 [FORMAT]
 max-line-length=110
@@ -15,3 +15,4 @@ max-attributes=15
 max-locals=30
 max-public-methods=30
 max-statements=70
+max-args=8

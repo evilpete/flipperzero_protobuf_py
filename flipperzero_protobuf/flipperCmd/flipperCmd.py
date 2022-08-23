@@ -9,7 +9,7 @@ FlipperCMD
 #
 #  From python flipperzero_protobuf pkg
 
-# pylint: disable=line-too-long, no-member, unused-import, unused-argument
+# pylint: disable=line-too-long, no-member, unused-import, unused-argument, too-many-public-methods
 # pylint bug reports "Deprecated module 'string' (deprecated-module)"
 import os
 import sys
@@ -17,11 +17,17 @@ import readline
 import string      # pylint: disable=deprecated-module
 import zipfile
 import time
+import traceback
+import glob
+import cmd
+import re
+
+#import shlex
 # import pprint
 
 
 # from google.protobuf.json_format import MessageToDict
-# from ..flipper_base import FlipperProtoException   # cmdException    # FlipperProtoBase
+from ..flipper_base import FlipperProtoException, Varint32Exception,  InputTypeException
 # from .flipper_storage import FlipperProtoStorage
 from ..flipper_proto import FlipperProto
 from ..cli_helpers import print_screen, flipper_tree_walk, calc_file_md5, calc_n_print_du, dict2datetime
@@ -52,7 +58,7 @@ class cmdException(Exception):
         Exception.__init__(self, msg)
 
 
-class FlipperCMD:
+class FlipperCMD(cmd.Cmd):
     # ppylint: disable=too-many-instance-attributes, too-many-public-methods
     """
     command call function
@@ -78,128 +84,375 @@ class FlipperCMD:
             serial_port = kwargs.get('serial_port', None)
             self.flip = FlipperProto(serial_port=serial_port, debug=self.debug)
 
-        self._cmd_table = {}
-        self._gen_cmd_table()
-
         self.rdir = '/ext'
         self.prevError = 'OK'
         self._local_time = time.localtime()
-        self.color_ls = False
+
+        self.aliases = {
+            'dev-info':  self.do_devinfo,
+            'df': self.do_info,
+            'exit': self.do_quit,
+            'get-tree': self.do_gettree,
+            'list': self.do_ls,
+            'md5': self.do_md5sum,
+            'rename': self.do_mv,
+            'print': self.do_echo,
+            'put-tree': self.do_puttree,
+            'start-app': self.do_startapp,
+            'start-session': self.do_startsession,
+            'stop-session': self.do_stopsession,
+        }
+
 
         self.valid_set = set(VALID_STR)
 
         self.verbose = kwargs.get('verbose', 0)
 
         self.excludes = [".thumbs", ".AppleDouble", ".RECYCLER", ".Spotlight-V100", '__pycache__']
+        self._cmd_setup()
+        cmd.Cmd.__init__(self)
 
-    def _gen_cmd_table(self):
-        """_gen_cmd_table doc"""
 
-        # has to be in method to referance itself
-        self.cmd_set = {
-            ("LS", "LIST"): self.do_list,
-            ("RM", "DEL", "DELETE"): self.do_del,
-            ("MV", "RENAME"): self.do_rename,
-            ('DU', 'DISK-USAGE'): self._do_disk_usage,
-            ("MD", "MKDIR"): self.do_mkdir,
-            ("MD5SUM", "MD5"): self.do_md5sum,
-            ("CAT",): self.do_cat_file,
-            ("GET", "GETFILE"): self.do_get_file,
-            ("GETT",): self.new_get_file,
-            ("PUTT",): self.new_put_file,
-            ("GET-TREE", "GETTREE"): self.do_get_tree,
-            ("PUT", "PUTFILE"): self.do_put_file,
-            ("PUT-TREE", "PUTTREE"): self.do_put_tree,
-            ("STAT",): self.do_stat,
-            ("SET",): self._set_opt,
-            ("TIME",): self.do_time,
-            ("DF", "INFO"): self.do_info,
-            ("DEV-INFO",): self.do_devinfo,
-            ("LCD", "LCHDIR"): self._do_chdir,
-            ("LPWD",): self._do_print_cwd,
-            ("PRINT-SCREEN",): self.do_print_screen,
-            ("CD", "CHDIR", "RCD"): self._set_rdir,
-            # ("PWD",):,
-            ("HISTORY", "HIST"): self._print_cmd_hist,  # Do we need this?
-            ("STOP-SESSION",): self.do_stop_session,
-            ("START-SESSION",): self.do_start_session,
-            ("START-APP", "STARTAPP"): self.do_startapp,
-            ("SEND", "SEND-COMMAND"): self._do_send_cmd,
-            ("REBOOT",): self.do_reboot,
-            ("QUIT", "EXIT"): self.do_quit,
-            ("ZIP",): self._do_zip,
-            ("HELP", "?"): self.print_cmd_help,
-        }
+    def _cmd_setup(self):
 
-        for k, v in self.cmd_set.items():
-            # print(f"len {type(k)} k{len(k)} {k}")
-            for c in k:
-                self._cmd_table[c] = v
+        completer_delims = readline.get_completer_delims()
+        completer_delims = completer_delims.replace("-", "")
+        completer_delims = completer_delims.replace("/", "")
+        self.identchars += '-'
+        # print('self.identchars',  self.identchars)
+        readline.set_completer_delims(completer_delims)
+
+
+        setattr(self, 'complete_del', self._complete_f)
+        setattr(self, 'complete_stat', self._complete_f)
+        setattr(self, 'complete_md5sum', self._complete_f)
+        setattr(self, 'complete_cat', self._complete_f)
+
+        setattr(self, 'complete_get', self._complete_f)
+
+        setattr(self, 'complete_cd', self._complete_f)
+        setattr(self, 'complete_ls', self._complete_f)
+        setattr(self, 'complete_info', self._complete_f)
+        setattr(self, 'complete_du', self._complete_f)
+        setattr(self, 'complete_mkdir', self._complete_f)
+
+        setattr(self, 'complete_lcd', self._complete_l)
+
+        setattr(self, 'complete_puttree', self._complete_lf)
+        setattr(self, 'complete_gettree', self._complete_fl)
+
+        setattr(self, 'complete_time', self._complete_none)
+        setattr(self, 'complete_stopsession', self._complete_none)
+        setattr(self, 'complete_startsession', self._complete_none)
+        setattr(self, 'complete_quit', self._complete_none)
+
+        # setattr(self, 'do_put-tree', self.do_puttree)
+
+
+
+    # =================
+
+    def cmdLoop(self):
+        """Main Command Loop"""
+        while True:
+            try:
+                super().cmdloop()
+                # cmd.Cmd.cmdLoop(self)
+            except (cmdException, FlipperProtoException) as e:
+                print("Command Error", e)
+                if self.verbose:
+                    traceback.print_exc(file=sys.stdout)
+            except (InputTypeException, ValueError) as e:
+                print("ValueError", e)
+                if self.verbose:
+                    traceback.print_exc(file=sys.stdout)
+            except Varint32Exception as e:
+                print("Protobuf protocal error", e)
+                if self.verbose:
+                    traceback.print_exc(file=sys.stdout)
+
+    def emptyline(self):
+        """Called when an empty line is entered in response to the prompt."""
+        return
+
+    def default(self, line):
+        """Called on an input line when the command prefix is not recognized."""
+        oline = line
+        ccmd, arg, line = self.parseline(oline)
+        if self.verbose:
+            print(f"default: '{ccmd}' '{arg}'")
+            print(f"line: {line}")
+            print(f"oline: {oline}")
+        if ccmd.lower() in self.aliases:
+            self.aliases[ccmd](arg)
+        else:
+            print(f"*** Unknown syntax: {line}")
+
+    def do_EOF(self, _arg):
+        """Emd of File Action"""
+        return True
+
+    def complete_reboot(self, text, line, begidx, endidx):
+        """Command arg complete for reboot cmd"""
+        idx = [m.start() for m in re.finditer(r"\S+", line)][1:]
+        if len(idx) > 1:
+            return []
+
+        # print("\ncomplete_reboot")
+        reboot_args = ['OS', 'DFU', 'UPDATE']
+        if text:
+            # print(f" text='{text}'")
+            comm = text.strip().upper()
+            # print(f" comm='{comm}'")
+            for x in reboot_args:
+                if x.startswith(comm):
+                    return [x]
+
+        return reboot_args
+
+    def _complete_none(self, text, line, begidx, endidx):
+        """No arg completion"""
+        return []
+
+    def _complete_fl(self, text, line, begidx, endidx):
+        """complete args <flipperFile> <LocalFile>"""
+        try:
+            ret = self._complete_args(text, line, begidx, endidx, argtype=['f', 'l'])
+        except cmdException as _e:
+            if self.verbose:
+                print(f"_complete_l: {_e}")
+                traceback.print_exc(file=sys.stdout)
+        return ret
+
+    def _complete_lf(self, text, line, begidx, endidx):
+        """complete args <LocalFile> <FlipperFile>"""
+        try:
+            ret = self._complete_args(text, line, begidx, endidx, argtype=['l', 'f'])
+        except cmdException as _e:
+            if self.verbose:
+                print(f"_complete_l: {_e}")
+                traceback.print_exc(file=sys.stdout)
+        return ret
+
+    def _complete_l(self, text, line, begidx, endidx):
+        """complete args <LocalFile>"""
+        try:
+            ret = self._complete_args(text, line, begidx, endidx, argtype=['l'])
+        except cmdException as _e:
+            if self.verbose:
+                print(f"_complete_l: {_e}")
+                traceback.print_exc(file=sys.stdout)
+        return ret
+
+    def _complete_f(self, text, line, begidx, endidx):
+        """complete args <FlipperFile>"""
+        try:
+            ret = self._complete_args(text, line, begidx, endidx,  argtype=['f'])
+        except cmdException as _e:
+            if self.verbose:
+                print(f"_complete_f: {_e}")
+                traceback.print_exc(file=sys.stdout)
+        return ret
+
+    def _aindex(self, a, i):
+        try:
+            return a.index(i)
+        except ValueError:
+            return -1
+
+    def flipper_file_comp(self, text):
+        """file complete look up for on flipper"""
+        results = []
+
+        path, targ = os.path.split(text)
+        if self.verbose:
+            print(f"path={path} targ={targ}")
+        file_list = self._get_list(path, ftype='DIR')
+        file_list.sort()
+        if self.verbose:
+            print(f"file_list={file_list}")
+        results = [x for x in file_list if x.startswith(targ)]
+        if self.verbose:
+            print(f"results={results}")
+            print("\n\n")
+        sys.stdout.flush()
+
+        if len(results) == 1:
+            res = []
+            if not path or path[0] != '/':
+                res.append(self.rdir + '/')
+            if path:
+                res.append(path + '/')
+            res.append(results[0])
+            results[0] = ''.join(res)
+
+        return results
+
+    def _complete_args(self, text, line, begidx, endidx, ftype=None, argtype=[]):
+
+        idx = [m.start() for m in re.finditer(r'\S+', line)][1:]
+        if idx and line[idx[0]] == '-':
+            idx.pop(0) # skip options
+        if self.verbose:
+            print("\n")
+            print(f"{idx}", [line[x] for x in idx])
+            print("index = ", self._aindex(idx, begidx))
+
+        if self.verbose:
+            print("complete_ls")
+            print(" line_len=",len(line))
+            print(f" text='{text}'")
+            print(f"       {' ' * begidx}v")
+            print(f" line='{line}'")
+            print(f"       {' ' * endidx}^")
+            # print(f" begidx={begidx} {line[begidx]}")
+            print(f" begidx={begidx}")
+            if endidx >= len(line):
+                print(f" endidx={endidx} ~~'{line[-1:endidx]}'")
+            else:
+                print(f" endidx={endidx} '{line[endidx]}'")
+
+            print("\n")
+
+        if not argtype:
+            return []
+
+        arg_num = self._aindex(idx, begidx)
+
+        if arg_num == -1 or arg_num > len(argtype):
+            return []
+
+        comp_type = argtype[arg_num]
+
+        if comp_type == 'f':
+            return self.flipper_file_comp(text)
+
+        if comp_type == 'l':
+
+#                if False:
+#                    before_arg = line.rfind(" ", 0, begidx)
+#                    # print(f"before_arg:", before_arg)
+#
+#                    # fixed = line[before_arg+1:begidx]  # fixed portion of the arg
+#                    # print(f"fixed {fixed}")
+#                    arg = line[before_arg+1:endidx]
+#                    # print(f"arg {arg}")
+#                    pattern = arg + '*'
+#                    # print(f"pattern {pattern}")
+#
+#                    completions = []
+#                    g = sorted(glob.glob(pattern))
+#                    if self.verbose:
+#                        print("glob", g)
+#                    if len(g) == 1:
+#                        return g
+#
+#                    ri = self._aindex(text, '/')
+#                    # ri = text.rindex('/')
+#                    if self.verbose:
+#                        print("ri:", ri)
+#
+#                    for path in g:  # glob.glob(pattern):
+#                        path = self._append_slash_if_dir(path)
+#                        # completions.append(path.replace(fixed, "", 1))
+#                        if ri > 0:
+#                            path = path[ri+1:]
+#                        completions.append(path)
+#                    # print("\ncompletions:", completions)
+#                    return completions
+
+                # before_arg = line.rfind(" ", 0, begidx)
+                # print(before_arg+1, begidx)
+                # fixed = line[before_arg+1:begidx]
+                # print(f"fixed {fixed}")
+
+            return self.local_file_comp(text)
+
+        return []
+
+
+
+    def _append_slash_if_dir(self, p):
+        if p and os.path.isdir(p) and p[-1] != os.sep:
+            return p + os.sep
+
+        return p
+
+    def local_file_comp(self, text):
+        """ File path autocompletion, used with the cmd module complete_* series functions"""
+        # http://stackoverflow.com/questions/16826172/filename-tab-completion-in-cmd-cmd-of-python
+
+        ri = self._aindex(text, '/')
+        pattern = text + '*'
+
+        completions = []
+        if self.verbose:
+            print(f"{pattern} :", glob.glob(pattern))
+        g = glob.glob(pattern)
+        if len(g) == 1:
+            return g
+
+        for path in glob.glob(pattern):
+            path = self._append_slash_if_dir(path)
+            if ri > 0:
+                path = path[ri+1:]
+            completions.append(path)
+            # completions.append(path.replace(text, "", 1))
+
+        if self.verbose:
+            print("completions: ", completions)
+
+        return completions
+
+    # =================
 
     def get_cmd_keys(self) -> list:
         """returns list of commands"""
-        return self._cmd_table.keys()
 
-    def run_comm(self, argv) -> None:
-        """run command line"""
-        cmd = argv.pop(0).upper()
+    def do_echo(self, arg):
+        """write arguments to the standard output"""
+        print(arg)
 
-        if cmd == 'SLEEP':
-            sleep_time = 5
-            if argv:
-                sleep_time = int(argv[0])
-            if self.verbose:
-                print(f"{cmd} {sleep_time}")
-            time.sleep(sleep_time)
+    def do_sleep(self, arg):
+        """Sleep for an interval of time"""
+        if arg.isdigit():
+            time.sleep(int(arg))
             return
+        print("Unknown Arg {arg}")
 
-        if cmd in ['ECHO', "PRINT"]:
-            print(" ".join(argv))
-            return
-
-        if cmd in self._cmd_table:
-
-            # handle help here insteqd of everywhere else
-            if argv and argv[0] == '?':
-                print("==")
-                print(self._get_cmd_syntax(cmd))
-                return
-
-            self._cmd_table[cmd](cmd, argv)
-        else:
-            print("Unknown command : ", cmd)  # str(" ").join(argv)
-
-    def do_quit(self, cmd, argv):   # pylint: disable=unused-argument
+    def do_quit(self, _arg):   # pylint: disable=unused-argument
         """Exit Program
         QUIT
         """
         raise self.QuitException("Quit interactive mode")
+        # return True
 
-    def _do_print_cwd(self, cmd, argv):   # pylint: disable=unused-argument
+    def do_lcwd(self, _cmd, _argv):   # pylint: disable=unused-argument
         """print local working directory
         LPWD
         """
         print(os.getcwd())
 
-    def do_cmd_help(self, cmd, argv):    # pylint: disable=unused-argument
-        """print command list"""
-        self.print_cmd_help(cmd, argv)
-
+    # def _do_cmd_help(self, cmd, argv):    # pylint: disable=unused-argument
+    #     """print command list"""
+    #     self.print_cmd_help(cmd, argv)
+    #
     # prints first line of __doc__ string
-    def print_cmd_help(self, cmd, argv):   # pylint: disable=unused-argument
-        """print command list"""
-
-        if argv and argv[0].upper() in self._cmd_table:
-            hcmd = argv[0].upper()
-            if self._cmd_table[hcmd].__doc__:
-                hlist = self._cmd_table[hcmd].__doc__.split('\n')
-                print(hlist[0])
-                print("\t", hlist[1].strip())
-                return
-
-        for k, v in sorted(self.cmd_set.items()):
-            if v.__doc__:
-                print(f" {' '.join(k):<20s}:", v.__doc__.split('\n')[0].strip())
+    # def print_cmd_help(self, arg):   # pylint: disable=unused-argument
+    #     """print command list"""
+    #     argv = arg.split()
+    #
+    #     if argv and argv[0].upper() in self._cmd_table:
+    #         hcmd = argv[0].upper()
+    #         if self._cmd_table[hcmd].__doc__:
+    #             hlist = self._cmd_table[hcmd].__doc__.split('\n')
+    #             print(hlist[0])
+    #             print("\t", hlist[1].strip())
+    #             return
+    #
+    #     for k, v in sorted(self.cmd_set.items()):
+    #         if v.__doc__:
+    #             print(f" {' '.join(k):<20s}:", v.__doc__.split('\n')[0].strip())
 
     def _get_cmd_syntax(self, cmdname):
         if cmdname in self._cmd_table and self._cmd_table[cmdname].__doc__:
@@ -209,43 +462,81 @@ class FlipperCMD:
 
         return ret
 
-    # Do we need this ??
-    def _print_cmd_hist(self, cmd, argv):
-        """Print command history
-            history [count]
-        """
+#    # Do we need this ??
+#    def _print_cmd_hist(self, cmd, argv):
+#        """Print command history
+#            history [count]
+#        """
+#
+#        show_count = 20
+#
+#        if argv:
+#            if argv[0].upper() in ['?', 'HELP']:
+#                raise cmdException(f"Syntax:\n\t{cmd} [count]\n"
+#                                   "\tprint command history")
+#
+#            if argv[0].lstrip('-').isdigit():
+#                show_count = int(argv[0].lstrip('-'))
+#
+#        start_at = readline.get_current_history_length() - show_count
+#        # print(f"{start_at} = {readline.get_current_history_length()} - {show_count}")
+#        start_at = max(start_at, 0)
+#
+#        # print(f"show_count={show_count} start_at={start_at}")
+#        # for hist in self.cmdHistory[start_at:]:
+#        #    print(f"   {hist}")
+#
+#        for i in range(start_at, readline.get_current_history_length()):
+#            print(str(readline.get_history_item(i + 1)))
 
-        show_count = 20
-
-        if argv:
-            if argv[0].upper() in ['?', 'HELP']:
-                raise cmdException(f"Syntax:\n\t{cmd} [count]\n"
-                                   "\tprint command history")
-
-            if argv[0].lstrip('-').isdigit():
-                show_count = int(argv[0].lstrip('-'))
-
-        start_at = readline.get_current_history_length() - show_count
-        # print(f"{start_at} = {readline.get_current_history_length()} - {show_count}")
-        start_at = max(start_at, 0)
-
-        # print(f"show_count={show_count} start_at={start_at}")
-        # for hist in self.cmdHistory[start_at:]:
-        #    print(f"   {hist}")
-
-        for i in range(start_at, readline.get_current_history_length()):
-            print(str(readline.get_history_item(i + 1)))
-
-    def do_devinfo(self, cmd, argv):  # pylint: disable=unused-argument
+    def do_devinfo(self, arg=None):  # pylint: disable=unused-argument
         """print device info
-        Dev-Info
+        dev-Info [name]
         """
-        if argv and argv[0] in self.flip.device_info:
-            print(f"{argv[0]:<25s} = {self.flip.device_info[argv[0]]}")
-            return
+
+        if arg:
+            arg = arg.strip()
+            if arg in self.flip.device_info:
+                print(f"{arg:<25s} = {self.flip.device_info[arg]}")
+                return
 
         for k, v in sorted(self.flip.device_info.items()):
             print(f"{k:<25s} = {v}")
+
+    def complete_devinfo(self, text, line, begidx, endidx):
+        """Command arg complete for devinfo cmd"""
+        print("complete_devinfo")
+        print(" line_len=",len(line))
+        print(f" text='{text}'")
+        print(f"       {' ' * begidx}v  {begidx}")
+        print(f" line='{line}'")
+        print(f"       {' ' * endidx}^  {endidx}")
+        # print(f" begidx={begidx} {line[begidx]}")
+
+        try:
+            idx = [m.start() for m in re.finditer(r'\S+', line)][1:]
+            if len(idx) > 1:
+                return []
+
+            devinfo_keys = sorted(self.flip.device_info.keys())
+
+            ret = []
+            if text:
+                # print(f" text='{text}'")
+                targ = text.strip().lower()
+                for x in devinfo_keys:
+                    if x.startswith(targ):
+                        ret.append(x)
+                return ret
+
+            return devinfo_keys
+
+        except (cmdException, FlipperProtoException) as _e:
+            print(f"complete_devinfo: {_e}")
+            if self.verbose:
+                traceback.print_exc(file=sys.stdout)
+            return []
+
 
     def _interpret_val(self, opt):
         opt = opt.upper()
@@ -261,27 +552,21 @@ class FlipperCMD:
 
         return None
 
-    def _set_opt(self, cmd, argv):     # pylint: disable=unused-argument
+    def do_set(self, arg):     # pylint: disable=unused-argument
         """set or print current option value
         SET [Key Value]
         """
+        argv = arg.split()
         if len(argv) < 2:
             excl = ' '.join(self.excludes)
             print(f"\tverbose:\t{self.verbose}\n"
                   f"\tdebug:  \t{self.debug}\n"
-                  f"\tColor:    \t{self.color_ls}\n"
                   f"\tremote-dir:\t{self.rdir}\n"
                   f"\tPort:   \t{self.flip.port()}\n"
                   f"\texcludes: \t{excl}\n"
                   f"\tCWD:    \t{os.getcwd()}\n")
             return
 
-        # print(f"set_opt {argv[0].upper()}")
-        if argv[0].upper() == "COLOR":
-            val = self._interpret_val(argv[1])
-            if val is not None:
-                self.color_ls = val
-            return
 
         if argv[0].upper() == "DEBUG":
             val = self._interpret_val(argv[1])
@@ -305,10 +590,11 @@ class FlipperCMD:
 
         raise cmdException(f"{cmd}: {argv[0]}: value not recognised")
 
-    def do_time(self, cmd, argv):    # pylint: disable=unused-argument
+    def do_time(self, arg):    # pylint: disable=unused-argument
         """Set or Get Current time from Flipper
         time [SET]
         """
+        argv = arg.split()
         set_time = False
         if argv:
             if argv[0].upper() in ['SET', 'SET-TIME']:
@@ -333,10 +619,11 @@ class FlipperCMD:
 
         return os.path.normpath(self.rdir + '/' + path)
 
-    def _do_disk_usage(self, cmd, argv):
+    def do_du(self, arg):
         """display disk usage statistic
         DU <fipper_dir>
         """
+        argv = arg.split()
         if (not argv or argv[0] == '?'):
             raise cmdException(f"Syntax:\n\t{cmd} <DIR>\n"
                                "\tdisplay disk usage")
@@ -345,10 +632,11 @@ class FlipperCMD:
 
         calc_n_print_du(self.flip, targ)
 
-    def _do_zip(self, cmd, argv):
+    def do_zip(self, arg):
         """Generate Zip Archive
         ZIP <zipfile> <fipper_dir>
         """
+        argv = arg.split()
         if (not argv or argv[0] == '?' or len(argv) < 2):
             raise cmdException(f"Syntax:\n\t{cmd} <zipfile> <DIR>\n"
                                "\tGenerate Zip Archive")
@@ -397,18 +685,18 @@ class FlipperCMD:
         zfi.external_attr = (0o0644 << 16)
         zf.writestr(zfi, file_data)
 
-    def _do_send_cmd(self, cmd, argv):  # pylint: disable=unused-argument
+    def do_sendcmd(self, line):  # pylint: disable=unused-argument
         """Semd non rpc command to flipper
         SEND <command string>
         """
-        cmd_str = " ".join(argv)
-        self.flip.send_cmd(cmd_str)
+        self.flip.send_cmd(line)
 
     # pylint: disable=protected-access
-    def _set_rdir(self, cmd, argv) -> None:
+    def do_cd(self, arg) -> None:
         """change current directory on flipper
            cd <DIR>\n
         """
+        argv = arg.split()
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax:\n\t{cmd} <DIR>\n"
                                "\tset remote directory")
@@ -422,24 +710,27 @@ class FlipperCMD:
 
         if newdir in ['/', '/ext', '/int']:
             self.rdir = newdir
-            print(f"Remote directory: {newdir}")
+            # print(f"Remote directory: {newdir}")
+            self.prompt = f"{self.rdir} flipper> "
             return
 
-        stat_resp = self.flip._rpc_stat(newdir)
+        stat_resp = self.flip._rpc_stat(newdir.rstrip('/'))
 
         if stat_resp is None:
             print(f"{newdir}: Not found")
         elif stat_resp['type'] == 'DIR':
             self.rdir = newdir
+            self.prompt = f"{self.rdir} flipper> "
             if self.verbose:
                 print(f"Remote directory: {newdir}")
         else:
             print("{newdir}: not a directory")
 
-    def do_print_screen(self, cmd, argv):
+    def do_printscreen(self, arg):
         """Take screendump in ascii or PBM format
             PRINT-SCREEN [filename.pbm]
         """
+        argv = arg.split()
         outf = None
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax:\n\t{cmd} [filename.pbm]\n"
@@ -466,8 +757,6 @@ class FlipperCMD:
 
         buffer = "  "
         for f in filelist:
-            if self.color_ls and f[-1] == '/':
-                f = self._blue(f)
             f = tpl.format(f)
             if len(buffer + f) > columns:
                 print(buffer)
@@ -478,7 +767,6 @@ class FlipperCMD:
 
     # storage_pb2.File.DIR == 1
     # storage_pb2.File.FILE == 0
-    # Colors
     @staticmethod
     def _pink(t):
         """display pink text"""
@@ -495,7 +783,8 @@ class FlipperCMD:
 
     def _get_list(self, path, ftype=None):
 
-        print(f"_get_list '{path}' '{ftype}'")
+        if self.verbose:
+            print(f"_get_list '{path}' '{ftype}'")
 
         if not path.startswith('/'):
             path = os.path.normpath(self.rdir + '/' + path)
@@ -504,7 +793,8 @@ class FlipperCMD:
         if len(path) > 1:
             path = path.rstrip('/')
 
-        print(f"rpc_storage_list '{path}'")
+        if self.verbose:
+            print(f"rpc_storage_list '{path}'")
 
         flist = self.flip.rpc_storage_list(path)
 
@@ -521,6 +811,7 @@ class FlipperCMD:
         # flist.sort(key=lambda x: (x['type'], x['name'].lower()))
 
         return flist
+
     #
     # rpc call storage_list_request only takes folders as
     # a valid arg.
@@ -532,18 +823,22 @@ class FlipperCMD:
     #
     # thus we have to special case the f*ck out of the list command
     #
-    def do_list(self, cmd, argv):
+    def do_ls(self, arg):
         """list files and dirs on Flipper device
         ls [-l] [-m] <flipper_directory>
         """
         # pylint: disable=protected-access
+
+        argv = arg.split()
 
         long_format = False
         md5_format = False
 
         while argv:
             if argv[0] in ['-help', '?']:
-                raise cmdException(f"Syntax :\n\t{cmd} [-l] [-m] <path>")
+                self.do_help('ls')
+                return
+                # raise cmdException(f"Syntax :\n\t{cmd} [-l] [-m] <path>")
 
             if argv[0][0] != '-':
                 break
@@ -577,7 +872,7 @@ class FlipperCMD:
             if stat_resp is not None and stat_resp.get('type', "") == 'FILE':
                 if md5_format:
                     md5val = self.flip.rpc_md5sum(targ)
-                print(f"{targ:<25s}\t{stat_resp['size']:>6d}", md5val)
+                # print(f"{targ:<25s}\t{stat_resp['size']:>6d}", md5val)
                 return
 
         flist = self.flip.rpc_storage_list(targ)
@@ -611,13 +906,16 @@ class FlipperCMD:
         # add blank line
         print()
 
-    def do_del(self, cmd, argv):
+    def do_del(self, arg):
         """delete file of directory on flipper device
         DEL [-r] <file|dir> [file] file]
         """
+        argv = arg.split()
+
         error_str = f"Syntax :\n\t{cmd} [-r] file"
         # if not argv or argv[0] == '?':
         #     raise cmdException(error_str)
+
 
         recursive = False
         if argv and argv[0] in ['-r', '-R']:
@@ -638,11 +936,13 @@ class FlipperCMD:
 
             self.flip.rpc_delete(targ, recursive=recursive)
 
-    def do_rename(self, cmd, argv):
-        """rename file or dir
-            RENAME <old_name> <new_name>
+    def do_mv(self, arg):
+        """mv file or dir
+            mv <old_name> <new_name>
+
             renames or move file on flipper device
         """
+        argv = arg.split()
         if len(argv) < 2 or (argv and argv[0] == "?"):
             raise cmdException(f"Syntax :\n\t{cmd} <old_name> <new_name>")
 
@@ -706,11 +1006,14 @@ class FlipperCMD:
             subpath = subpath + '/' + p
             self.flip._mkdir_path(subpath)
 
-    def do_mkdir(self, cmd, argv):
+    def do_mkdir(self, arg):
         """Create a new directory
-            MKDIR <directory>
+        mkdiR <directory>
+
             Make directories on flipper device
         """
+        argv = arg.split()
+
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax :\n\t{cmd} <directory>")
 
@@ -723,10 +1026,11 @@ class FlipperCMD:
 
         self.flip.rpc_mkdir(targ)
 
-    def _do_chdir(self, cmd, argv):
+    def do_lcd(self, arg):
         """Change local current directory
-        LCD  <directory>
+        lcd  <directory>
         """
+        argv = arg.split()
         # pylint: disable=broad-except, unused-argument
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax :\n\t{cmd} <directory>")
@@ -742,28 +1046,31 @@ class FlipperCMD:
         except Exception as _e:
             print(f"CHDIR: {_e}")
 
-    def do_md5sum(self, cmd, argv):
+    def do_md5sum(self, arg):
         """md5 hash of the file
-        MD5 <flipper_file>
+        md5 <flipper_file>
         """
-        if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
-            raise cmdException(f"Syntax :\n\t{cmd} file")
+        ccmd = "md5"
+        argv = arg.split()
+        if (len(argv) == 0 or argv[0] == '?'):
+            raise cmdException(f"Syntax :\n\t{ccmd} file")
 
-        targ = argv.pop(0)
+        for targ in argv:
 
-        if not targ.startswith('/'):
-            targ = os.path.normpath(self.rdir + '/' + targ)
+            if not targ.startswith('/'):
+                targ = os.path.normpath(self.rdir + '/' + targ)
 
-        if self.debug:
-            print(cmd, targ)
+            if self.debug:
+                print(ccmd, targ)
 
-        md5sum_resp = self.flip.rpc_md5sum(targ)
-        print(f"md5sum_resp={md5sum_resp}")
+            md5sum_resp = self.flip.rpc_md5sum(targ)
+            print(f"md5sum_resp={md5sum_resp}")
 
-    def do_cat_file(self, cmd, argv):
+    def do_cat_file(self, arg):
         """read flipper file to screen
         cat <flipper_file>
         """
+        argv = arg.split()
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax :\n\t{cmd} file")
 
@@ -795,17 +1102,21 @@ class FlipperCMD:
         # return set(fname) - self.valid_set
         return set(fname) <= self.valid_set
 
-    def new_get_file(self, cmd, argv):
+    # (self, cmd, argv):
+    def do_get(self, arg):
         """copy file from flipper
-        GET <flipper_file> <local_filename>
+        get <flipper_file> <local_filename>
         """
 
-        print("new_get_file:", cmd, argv)
+        argv = arg.split()
+
+        if self.verbose:
+            print("new_get_file:", argv)
 
         arg_len = len(argv)
 
         if arg_len == 1:
-            print("arg_len 1")
+            # print("arg_len 1")
 
             remote_filen = argv.pop(0)
             local_filen = os.path.basename(remote_filen)
@@ -817,7 +1128,7 @@ class FlipperCMD:
             return
 
         if arg_len == 2:
-            print("arg_len 2")
+            # print("arg_len 2")
 
             remote_filen = argv.pop(0)
             local_filen = argv.pop(0)
@@ -832,7 +1143,7 @@ class FlipperCMD:
             return
 
         # arg_len > 2
-        print("arg_len 3")
+        # print("arg_len 3")
         local_filen = argv.pop(-1)
         remote_list = argv
 
@@ -851,13 +1162,14 @@ class FlipperCMD:
 
             self._get_file(remote_name, local_name)
 
-    def do_get_file(self, cmd, argv):
+    def old_do_get(self, arg):
         """copy file from flipper
-        GET <flipper_file> [local_filename]
+        get <flipper_file> [local_filename]
         """
 
+        argv = arg.split()
         if (len(argv) < 1 or argv[0] == "?"):
-            raise cmdException(f"Syntax :\n\t{cmd} <remote_filename> <local_filename>")
+            raise cmdException("Syntax :\n\tget <remote_filename> <local_filename>")
 
         remote_filen = argv.pop(0)
         if argv:
@@ -901,12 +1213,13 @@ class FlipperCMD:
 
         self.flip.rpc_write(remote_filen, file_data)
 
-    def new_put_file(self, cmd, argv):
+    def do_put(self, arg):
         """copy file to flipper
-        PUT  <local_filename> <flipper_file>
+        put  <local_filename> <flipper_file>
         """
+        argv = arg.split()
         if (len(argv) < 1 or argv[0] == "?"):
-            raise cmdException(f"Syntax :\n\t{cmd} <local_file> <remote_file_or_dir>")
+            raise cmdException("Syntax :\n\tPUT <local_file> <remote_file_or_dir>")
 
         arg_len = len(argv)
 
@@ -950,12 +1263,13 @@ class FlipperCMD:
             remote_name = remote_filen + '/' + os.path.basename(f)
             self._put_file(f, remote_name)
 
-    def do_put_file(self, cmd, argv):
+    def old_do_put(self, arg):
         """copy file to flipper
-        PUT  <local_filename> <flipper_file>
+        put  <local_filename> <flipper_file>
         """
+        argv = arg.split()
         if (len(argv) < 1 or argv[0] == "?"):
-            raise cmdException(f"Syntax :\n\t{cmd} <local_file> <remote_file_or_dir>")
+            raise cmdException("Syntax :\n\tput <local_file> <remote_file_or_dir>")
 
         local_filen = argv.pop(0)
         if argv:
@@ -997,13 +1311,15 @@ class FlipperCMD:
 
     # this needs code to act like cp/rsync were if source_file ends in a /,
     # the contents of the directory are copied rather than the directory itself
-    def do_put_tree(self, cmd, argv):
+    def do_puttree(self, arg):
         # pylint: disable=protected-access
         """copy directory tree to flipper
-        PUT-TREE  <local_directort> <flipper_directory>
+        put-tree  <local_directort> <flipper_directory>
+
         If the source_file ends in a /, the contents of
         the directory are copied rather than the directory itself.
         """
+        argv = arg.split()
         # excludes = [".thumbs", ".AppleDouble", ".RECYCLER", ".Spotlight-V100", '__pycache__']
         check_md5 = False
 
@@ -1093,13 +1409,15 @@ class FlipperCMD:
 
     # this needs code to act like cp/rsync were if source_file ends in a /,
     # the contents of the directory are copied rather than the directory itself
-    def do_get_tree(self, cmd, argv):
+    def do_gettree(self, arg):
         """copy directory tree from flipper
-        GET-TREE   <flipper_directory> <local_directort>
+        get-tree   <flipper_directory> <local_directort>
+
         If the source_file ends in a /, the contents of
         the directory are copied rather than the directory itself.
         """
 
+        argv = arg.split()
         verbose = self.debug or self.verbose
 
         syntax_str = f"Syntax :\n\t{cmd} <local_directory> <remote_destination>"
@@ -1156,11 +1474,12 @@ class FlipperCMD:
                 #     print(f"copy {ROOT} / {f} -> {locdir} / {f}")
                 self._get_file(f"{ROOT}/{f}", f"{locdir}/{f}")
 
-    def do_info(self, _cmd, argv):
+    def do_info(self, arg):
         """get Filesystem info
-            INFO [filesystem]
+            info [filesystem]
         """
 
+        argv = arg.split()
         targfs = ['/ext', '/int']
 
         if len(argv) > 0:
@@ -1181,10 +1500,11 @@ class FlipperCMD:
                   f"  usedspace:  {tspace - fspace}")
         print()
 
-    def do_stat(self, cmd, argv):
+    def do_stat(self, arg):
         """get info about file or directory
-        Stat <flipper_file>
+        stat <flipper_file>
         """
+        argv = arg.split()
 
         if (len(argv) == 0 or argv[0] == '?' or len(argv) > 1):
             raise cmdException(f"Syntax :\n\t{cmd} file")
@@ -1213,23 +1533,25 @@ class FlipperCMD:
         else:
             print(f"{targ:<25s}\t{stat_resp['size']:>6d}")
 
-    def do_start_session(self, cmd, argv):   # pylint: disable=unused-argument
+    def do_startsession(self, _arg):   # pylint: disable=unused-argument
         """(re) start RPC session
-        START-SESSION
+        start-session
         """
         self.flip.start_rpc_session()
 
-    def do_stop_session(self, cmd, argv):     # pylint: disable=unused-argument
+    def do_stopsession(self, _arg):     # pylint: disable=unused-argument
         """stop RPC session
-        STOP-SESSION
+        stop-session
         """
         self.flip.rpc_stop_session()
 
-    def do_reboot(self, cmd, argv):
+    def do_reboot(self, arg):
         """reboot flipper
-            REBOOT [MODE]
-            MODE can be 'OS', 'DFU' or 'UPDATE'
+            reboot [mode]
+
+            mode can be 'OS', 'DFU' or 'UPDATE'
         """
+        argv = arg.split()
 
         if (len(argv) < 1 or argv[0] == "?"):
             raise cmdException(f"Syntax :\n\t{cmd} [OS | DFU | UPDATE]")
@@ -1245,15 +1567,17 @@ class FlipperCMD:
         if mode in ['DFU', 'UPDATE']:
             self.QuitException(f"REBOOT {mode}")
 
-    def do_startapp(self, cmd, argv):
+    def do_startapp(self, arg):
         """Start App
-            START-APP <command_name> <args>
+            start-app <command_name> <args>
+
             Runs app in FlipperZero
 
             App Names:
                     "iButton", "NFC", "Sub-GHz", "125kHz-RFID",
                     "Infrared", "Bad-USB", "U2F", "UpdaterApp"
         """
+        argv = arg.split()
         if not argv or argv[0] in ["?", "help"]:
             raise cmdException(f"Syntax :\n\t{cmd} <command_name> <args>")
 

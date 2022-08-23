@@ -2,9 +2,10 @@
 """flipper command line app"""
 
 # import os
-# import sys
+import sys
 import shlex
 # import pprint
+import traceback
 import argparse
 
 
@@ -15,7 +16,7 @@ from ..flipper_base import InputTypeException, FlipperProtoException, Varint32Ex
 # from .flipper_storage import FlipperProtoStorage
 # from .flipper_proto import FlipperProto
 # from .cli_helpers import print_screen, flipper_tree_walk, calc_file_md5
-from .cmd_complete import Cmd_Complete
+# from .cmd_complete import Cmd_Complete
 
 
 def arg_opts():
@@ -76,11 +77,11 @@ def main() -> None:
         print("\n")
         interactive = True
 
-        compl = Cmd_Complete(flip=fcmd)
-        compl.setup(volcab=fcmd.get_cmd_keys())
+        # compl = Cmd_Complete(flip=fcmd)
+        # compl.setup(volcab=fcmd.get_cmd_keys())
 
     # I should rewrite this with the python CMD module framework
-    lineno = 1
+    # lineno = 1
     while 1:
         try:
 
@@ -91,21 +92,15 @@ def main() -> None:
                     argv = shlex.split(line, comments=True, posix=True)
                     if not argv or argv[0][0] == '#':
                         continue
-                    fcmd.run_comm(argv)
+                    fcmd.onecmd(argv)
                 break
 
             if interactive is True:
-                # print(f"{fcmd.rdir} flipper> ", end="")
-                prompt = f"{lineno} {fcmd.rdir} flipper> "
-                compl.prompt = prompt
-                argv = shlex.split(input(prompt), comments=True, posix=True)
+                fcmd.prompt = f"{fcmd.rdir} flipper> "
+                fcmd.cmdloop()
+                # argv = shlex.split(input(prompt), comments=True, posix=True)
                 # if argv is None or len(argv) == 0:
-                if not argv:
-                    # print()
-                    continue
-
-            lineno += 1
-            fcmd.run_comm(argv)
+                interactive = False
 
         except (EOFError, fcmd.QuitException, KeyboardInterrupt) as _e:
             interactive = False
@@ -113,8 +108,16 @@ def main() -> None:
             # print(_e)
             break
 
-        except (cmdException, FlipperProtoException) as e:
+        except FlipperProtoException as e:
+            print("FlipperProto Error", e)
+            # traceback.print_exc(file=sys.stdout)
+            if interactive:
+                continue
+            break
+
+        except cmdException as e:
             print("Command Error", e)
+            traceback.print_exc(file=sys.stdout)
             if interactive:
                 continue
             break
